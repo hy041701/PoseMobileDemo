@@ -1,0 +1,36 @@
+# Gradle and generated build output
+.gradle/
+**/build/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+
+# Kotlin
+.kotlin/
+
+# Local machine configuration
+local.properties
+
+# Native build output
+.externalNativeBuild/
+.cxx/
+
+# Generated application packages
+*.apk
+*.aab
+*.aar
+
+# MediaPipe models are downloaded by app/download_tasks.gradle
+*.task
+*.tasks
+*.tflite
+
+# Runtime exports and captures
+outputdata/
+captures/
+*.wav
+
+# Operating systems
+.DS_Store
+Thumbs.db
