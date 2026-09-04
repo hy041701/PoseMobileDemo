@@ -34,3 +34,22 @@ captures/
 # Operating systems
 .DS_Store
 Thumbs.db
+
+# Local reports, notes and experiment backups
+.codex-backups/
+backups/
+交付文档/
+docs/
+*.doc
+*.docx
+*.pdf
+*.md
+!README.md
+!LICENSE.md
+*.bak
+app/src/main/java/**/*_old*.txt
+app/src/main/java/**/*_before_*.txt
+
+# Private workout media and scoring assets
+app/src/main/assets/workout_*/
+app/src/main/res/raw/workout_*.mp4

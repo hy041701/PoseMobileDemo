@@ -56,6 +56,7 @@ class PoseLandmarkerHelper(
     private var poseLandmarker: PoseLandmarker? = null
 //    private val poseData = StringBuilder()
 
+    /* CSV本地保存已停用。
     /**
      * CSV字段：
      *
@@ -93,12 +94,14 @@ class PoseLandmarkerHelper(
      * 只有当该值大于0时才创建CSV文件。
      */
     private var poseDataRowCount = 0
+    */
 
     //它属于类的一部分。当根据这个类创建对象时，init中的代码会自动执行
     init {
         setupPoseLandmarker()
     }
 
+    /* CSV本地保存已停用。
     /**
      * MediaPipe中的visibility和presence是Optional<Float>。
      * 有值时写入数值；
@@ -230,6 +233,7 @@ class PoseLandmarkerHelper(
             return null
         }
     }
+    */
 
     /**
      * 关闭Pose Landmarker。
@@ -250,10 +254,9 @@ class PoseLandmarkerHelper(
 
         poseLandmarker = null
 
-        if (saveCsv) {
-
-            savePoseDataToFile()
-        }
+//        if (saveCsv) {
+//            savePoseDataToFile()
+//        }
     }
 
     // Return running status of PoseLandmarkerHelper
@@ -269,6 +272,19 @@ class PoseLandmarkerHelper(
     fun setupPoseLandmarker() {
         // Set general pose landmarker options
         val baseOptionBuilder = BaseOptions.builder()
+
+        val delegateName = if (currentDelegate == DELEGATE_GPU) "GPU" else "CPU"
+        val modelNameForLog = when (currentModel) {
+            MODEL_POSE_LANDMARKER_FULL -> "FULL"
+            MODEL_POSE_LANDMARKER_LITE -> "LITE"
+            MODEL_POSE_LANDMARKER_HEAVY -> "HEAVY"
+            else -> "UNKNOWN"
+        }
+        Log.i(
+            "POSE_DELEGATE",
+            "开始初始化 delegate=$delegateName, model=$modelNameForLog, " +
+                    "thread=${Thread.currentThread().name}"
+        )
 
         // Use the specified hardware for running the model. Default to CPU
         when (currentDelegate) {
@@ -328,6 +344,11 @@ class PoseLandmarkerHelper(
             val options = optionsBuilder.build()
             poseLandmarker =
                 PoseLandmarker.createFromOptions(context, options)
+            Log.i(
+                "POSE_DELEGATE",
+                "初始化成功 delegate=$delegateName, model=$modelNameForLog, " +
+                        "thread=${Thread.currentThread().name}"
+            )
         } catch (e: IllegalStateException) {
             poseLandmarkerHelperListener?.onError(
                 "Pose Landmarker failed to initialize. See error logs for " +
@@ -336,6 +357,11 @@ class PoseLandmarkerHelper(
             Log.e(
                 TAG, "MediaPipe failed to load the task with error: " + e
                     .message
+            )
+            Log.e(
+                "POSE_DELEGATE",
+                "初始化失败 delegate=$delegateName, model=$modelNameForLog, error=${e.message}",
+                e
             )
         } catch (e: RuntimeException) {
             // This occurs if the model being used does not support GPU
@@ -346,6 +372,11 @@ class PoseLandmarkerHelper(
             Log.e(
                 TAG,
                 "Image classifier failed to load model with error: " + e.message
+            )
+            Log.e(
+                "POSE_DELEGATE",
+                "初始化失败 delegate=$delegateName, model=$modelNameForLog, error=${e.message}",
+                e
             )
         }
     }
@@ -407,6 +438,7 @@ class PoseLandmarkerHelper(
         // be returned in returnLivestreamResult function
     }
 
+    /* CSV本地缓存已停用。
     fun resetPoseData() {
 
         synchronized(poseDataLock) {
@@ -418,6 +450,7 @@ class PoseLandmarkerHelper(
             poseDataRowCount = 0
         }
     }
+    */
 
 
     // Accepts the URI for a video file loaded from the user's gallery and attempts to run
@@ -483,11 +516,10 @@ class PoseLandmarkerHelper(
                     poseLandmarker?.detectForVideo(mpImage, timestampMs)
                         ?.let { detectionResult ->
 
-                            // 保存视频每一帧关键点
-                            saveLandmarks(
-                                result = detectionResult,
-                                frameTimestampMs = timestampMs
-                            )
+//                            saveLandmarks(
+//                                result = detectionResult,
+//                                frameTimestampMs = timestampMs
+//                            )
 
                             resultList.add(detectionResult)
                         } ?: {
@@ -540,11 +572,10 @@ class PoseLandmarkerHelper(
         // Run pose landmarker using MediaPipe Pose Landmarker API
         poseLandmarker?.detect(mpImage)?.also { landmarkResult ->
 
-            // 保存图片检测得到的关键点
-            saveLandmarks(
-                result = landmarkResult,
-                frameTimestampMs = 0L
-            )
+//            saveLandmarks(
+//                result = landmarkResult,
+//                frameTimestampMs = 0L
+//            )
 
             val inferenceTimeMs = SystemClock.uptimeMillis() - startTime
             return ResultBundle(
@@ -563,6 +594,7 @@ class PoseLandmarkerHelper(
         return null
     }
 
+    /* CSV本地缓存已停用。
     /**
      * 将一次检测结果追加到CSV缓存。
      *
@@ -676,6 +708,7 @@ class PoseLandmarkerHelper(
             }
         }
     }
+    */
 
     // Return the landmark result to this PoseLandmarkerHelper's caller
     private fun returnLivestreamResult(
@@ -685,11 +718,10 @@ class PoseLandmarkerHelper(
         val finishTimeMs = SystemClock.uptimeMillis()
         val inferenceTime = finishTimeMs - result.timestampMs()
 
-        // 保存关键点坐标
-        saveLandmarks(
-            result = result,
-            frameTimestampMs = result.timestampMs()
-        )
+//        saveLandmarks(
+//            result = result,
+//            frameTimestampMs = result.timestampMs()
+//        )
 
         poseLandmarkerHelperListener?.onResults(
             ResultBundle(
@@ -720,7 +752,7 @@ class PoseLandmarkerHelper(
         const val DEFAULT_POSE_PRESENCE_CONFIDENCE = 0.5F
 
         //修改识别的人数
-        const val DEFAULT_NUM_POSES = 2
+        const val DEFAULT_NUM_POSES = 1
         const val OTHER_ERROR = 0
         const val GPU_ERROR = 1
         const val MODEL_POSE_LANDMARKER_FULL = 0

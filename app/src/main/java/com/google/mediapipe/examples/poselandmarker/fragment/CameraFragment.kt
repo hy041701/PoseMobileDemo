@@ -60,11 +60,16 @@ import android.app.Activity
 import android.content.Intent
 import androidx.activity.result.contract.ActivityResultContracts
 import com.google.mediapipe.examples.poselandmarker.pairing.QrScanActivity
+import com.google.mediapipe.examples.poselandmarker.transport.OneEuroPoseFilter
 
 class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
     PoseConnectionManager.StateListener {
     companion object {
         private const val TAG = "Pose Landmarker"
+        private const val FULL_BODY_CALIBRATION_FRAMES = 3
+        private const val FULL_BODY_MIN_CONFIDENCE = 0.60f
+        private const val FULL_BODY_EDGE_MARGIN = 0.03f
+        private const val CALIBRATION_HINT_DURATION_MS = 5_000L
     }
     private var _fragmentCameraBinding: FragmentCameraBinding? = null
     private val fragmentCameraBinding
@@ -78,16 +83,28 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
     private var cameraProvider: ProcessCameraProvider? = null
     private var cameraFacing = CameraSelector.LENS_FACING_BACK
     private var poseFrameId: Long = 0L
+
+    // 发送给OTT前使用的姿态坐标滤波器。
+    private val poseFrameFilter = OneEuroPoseFilter(initialIntervalSeconds = 1f / 30f, minCutoff = 1.0f, beta = 0.01f, derivativeCutoff = 30.0f, resetGapMs = 400L)
+
     private val uiHandler = Handler(Looper.getMainLooper())
     @Volatile private var isReadyCheckActive = false
+    @Volatile private var isFullBodyCalibrationHintActive = false
+    @Volatile private var isFullBodyCalibrationFinishedForConnection = false
+    private var completeBodyCalibrationFrameCount = 0
+    private val calibrationHintTimeoutTask = Runnable { finishFullBodyCalibrationHint() }
     private var readyPoseStartedAtMs: Long? = null
     private var connectionSuccessDialog: AlertDialog? = null
     private var originalCameraTopMargin: Int? = null
     private var isImmersiveDetectionMode = false
     private var isOpeningQrAfterDetectionExit = false
+    @Volatile private var isPoseModelLoading = true
 
-    //临时性能诊断：统计MediaPipe结果回调、有效人体和姿态发送速度。测试结束后删除。
+    //临时性能诊断：统计CameraX送帧、MediaPipe结果回调和姿态发送速度。测试结束后删除。
     private var posePerfWindowStartedAtMs = SystemClock.elapsedRealtime()
+    private var posePerfCameraFrameCount = 0L
+    private var posePerfCameraWidth = 0
+    private var posePerfCameraHeight = 0
     private var posePerfInferenceCount = 0L
     private var posePerfValidPersonCount = 0L
     private var posePerfSendAttemptCount = 0L
@@ -138,12 +155,13 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
                 .navigate(R.id.action_camera_to_permissions)
         }
 
-        // Start the PoseLandmarkerHelper again when users come back
-        // to the foreground.
+        //正常切换扫码页或其他App时模型不会再在onPause中释放；这里只保留异常关闭后的兜底恢复。
         backgroundExecutor.execute {
             if(this::poseLandmarkerHelper.isInitialized) {
-                if (poseLandmarkerHelper.isClose()) {
+                if (poseLandmarkerHelper.isClose() && !isPoseModelLoading) {
+                    isPoseModelLoading = true
                     poseLandmarkerHelper.setupPoseLandmarker()
+                    isPoseModelLoading = false
                 }
             }
         }
@@ -157,10 +175,7 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
             viewModel.setMinPosePresenceConfidence(poseLandmarkerHelper.minPosePresenceConfidence)
             viewModel.setDelegate(poseLandmarkerHelper.currentDelegate)
 
-            backgroundExecutor.execute {
-                //离开Camera页面时保存本次Camera会话数据。没有关键点时savePoseDataToFile()会自动跳过，不会生成只有表头的CSV。
-                poseLandmarkerHelper.clearPoseLandmarker(saveCsv = true)
-            }
+            //短暂离开页面（例如打开扫码页或切换App）不销毁模型，返回后可立即继续识别。
         }
     }
 
@@ -170,8 +185,13 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
         connectionSuccessDialog?.dismiss()
         connectionSuccessDialog = null
 
-        // 关闭MediaPipe后台线程
+        //页面真正销毁时才在GPU所属线程释放MediaPipe模型。
         if (::backgroundExecutor.isInitialized) {
+            if (this::poseLandmarkerHelper.isInitialized) {
+                backgroundExecutor.execute {
+                    poseLandmarkerHelper.clearPoseLandmarker(saveCsv = false)
+                }
+            }
             backgroundExecutor.shutdown()
             try {
                 backgroundExecutor.awaitTermination(2, TimeUnit.SECONDS)
@@ -208,21 +228,32 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
             "PoseDataset/camera"
         )
 
-        poseLandmarkerHelper = PoseLandmarkerHelper(
-            context = requireContext(),
-            saveDirectory = saveDirectory,
-            runningMode = RunningMode.LIVE_STREAM,
-            minPoseDetectionConfidence = viewModel.currentMinPoseDetectionConfidence,
-            minPoseTrackingConfidence = viewModel.currentMinPoseTrackingConfidence,
-            minPosePresenceConfidence = viewModel.currentMinPosePresenceConfidence,
-            currentDelegate = viewModel.currentDelegate,
-            poseLandmarkerHelperListener = this
-        )
-
         PoseConnectionManager.setStateListener(this)
 
+        //相机预览不依赖MediaPipe模型，进入页面后立即启动，避免等待模型时出现黑屏。
         fragmentCameraBinding.viewFinder.post { setUpCamera() }
-        initBottomSheetControls()
+
+        //GPU必须在创建它的同一线程中使用；Helper初始化与CameraX分析共用该单线程。
+        backgroundExecutor.execute {
+            poseLandmarkerHelper = PoseLandmarkerHelper(
+                context = requireContext(),
+                saveDirectory = saveDirectory,
+                runningMode = RunningMode.LIVE_STREAM,
+                minPoseDetectionConfidence = viewModel.currentMinPoseDetectionConfidence,
+                minPoseTrackingConfidence = viewModel.currentMinPoseTrackingConfidence,
+                minPosePresenceConfidence = viewModel.currentMinPosePresenceConfidence,
+                currentModel = viewModel.currentModel,
+                currentDelegate = viewModel.currentDelegate,
+                poseLandmarkerHelperListener = this
+            )
+            isPoseModelLoading = false
+
+            activity?.runOnUiThread {
+                if (_fragmentCameraBinding != null) {
+                    initBottomSheetControls()
+                }
+            }
+        }
 
         //点击“扫描二维码”
         fragmentCameraBinding.btnScanOtt.setOnClickListener {
@@ -233,6 +264,7 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
     override fun onPairingSucceeded() {
         activity?.runOnUiThread {
             if (_fragmentCameraBinding == null) return@runOnUiThread
+            resetFullBodyCalibrationSession()
             switchToFrontCameraForExercise()
             showConnectionSucceededDialog()
         }
@@ -240,11 +272,13 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
 
     //扫码仍使用后置摄像头；配对成功后将人体检测相机切换为前置摄像头。
     private fun switchToFrontCameraForExercise() {
-        if (cameraFacing == CameraSelector.LENS_FACING_FRONT) return
-        cameraFacing = CameraSelector.LENS_FACING_FRONT
-        if (cameraProvider != null && _fragmentCameraBinding != null) {
-            bindCameraUseCases()
+        if (cameraFacing == CameraSelector.LENS_FACING_FRONT) {
+            return
         }
+        // 前后相机画面坐标和分辨率可能不同，不能沿用旧滤波状态。
+        poseFrameFilter.reset()
+        cameraFacing = CameraSelector.LENS_FACING_FRONT
+        if (cameraProvider != null && _fragmentCameraBinding != null) { bindCameraUseCases() }
     }
 
     //扫码完成后立即显示全屏前置相机，连接成功前暂不执行准备动作判断。
@@ -260,8 +294,10 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
     }
 
     override fun onDisconnected() {
+        poseFrameFilter.reset()   //重置滤波器
         activity?.runOnUiThread {
             if (_fragmentCameraBinding == null) return@runOnUiThread
+            resetFullBodyCalibrationSession()
             leaveImmersiveCameraMode()
             if (!isOpeningQrAfterDetectionExit) {
                 Toast.makeText(requireContext(), "电视连接已断开", Toast.LENGTH_SHORT).show()
@@ -270,8 +306,10 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
     }
 
     override fun onConnectionError(error: String) {
+        poseFrameFilter.reset()
         activity?.runOnUiThread {
             if (_fragmentCameraBinding == null) return@runOnUiThread
+            resetFullBodyCalibrationSession()
             leaveImmersiveCameraMode()
             Toast.makeText(requireContext(), "连接失败，请重新扫码", Toast.LENGTH_SHORT).show()
         }
@@ -279,6 +317,9 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
 
     override fun onPracticeStarted(workoutId: String) {
         Log.i(TAG, "OTT允许开始训练，workoutId=$workoutId")
+        activity?.runOnUiThread {
+            if (_fragmentCameraBinding != null) { startFullBodyCalibrationHint() }
+        }
     }
 
     override fun onPracticeStopped() {
@@ -286,8 +327,10 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
     }
 
     override fun onRemoteExitDetection() {
+        poseFrameFilter.reset()
         activity?.runOnUiThread {
             if (_fragmentCameraBinding == null) return@runOnUiThread
+            resetFullBodyCalibrationSession()
             isOpeningQrAfterDetectionExit = true
             leaveImmersiveCameraMode()
             PoseConnectionManager.finishRemoteExitDetection()
@@ -298,6 +341,7 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
     //检测状态下按返回键：通知OTT并回到扫码页面。
     fun handleBackPressed(): Boolean {
         if (!isImmersiveDetectionMode) return false
+        resetFullBodyCalibrationSession()
         isOpeningQrAfterDetectionExit = true
         PoseConnectionManager.exitDetectionFromPhone()
         leaveImmersiveCameraMode()
@@ -333,6 +377,7 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
         enterImmersiveCameraMode()
         fragmentCameraBinding.overlay.visibility = View.GONE
         fragmentCameraBinding.readyCheckOverlay.visibility = View.VISIBLE
+        fragmentCameraBinding.readyPoseGuide.visibility = View.VISIBLE
         fragmentCameraBinding.tvReadyCheckHint.text = "请面对手机，举起右手"
     }
 
@@ -410,6 +455,79 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
                     fragmentCameraBinding.readyCheckOverlay.visibility = View.GONE
                 }
             }, 800L)
+        }
+    }
+
+    //OTT开始倒计时后提示用户完整入镜；同一次连接只执行一次。
+    private fun startFullBodyCalibrationHint() {
+        if (isFullBodyCalibrationFinishedForConnection || isFullBodyCalibrationHintActive) { return }
+        isFullBodyCalibrationHintActive = true
+        completeBodyCalibrationFrameCount = 0
+        fragmentCameraBinding.readyCheckOverlay.visibility = View.VISIBLE
+        fragmentCameraBinding.readyCheckOverlay.bringToFront()
+        //标定阶段只保留文字提示，不再显示动作检测阶段的举右手示意图。
+        fragmentCameraBinding.readyPoseGuide.visibility = View.GONE
+        fragmentCameraBinding.tvReadyCheckHint.text = "请确保完整人物进入画面"
+        uiHandler.removeCallbacks(calibrationHintTimeoutTask)
+        uiHandler.postDelayed(calibrationHintTimeoutTask, CALIBRATION_HINT_DURATION_MS)
+    }
+
+    //手机端使用与OTT一致的完整人体规则，连续3帧满足后提前取消提示。
+    private fun updateFullBodyCalibrationHint(result: PoseLandmarkerResult) {
+        if (!isFullBodyCalibrationHintActive) { return }
+        val landmarks = result.landmarks().firstOrNull()
+        if (landmarks == null || landmarks.size < 29) {
+            completeBodyCalibrationFrameCount = 0
+            return
+        }
+
+        val requiredIds = intArrayOf(0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28)
+        val isCompleteBody = requiredIds.all { id ->
+            val point = landmarks[id]
+            val x = point.x()
+            val y = point.y()
+            x.isFinite() && y.isFinite() &&
+                    point.visibility().orElse(0f) >= FULL_BODY_MIN_CONFIDENCE &&
+                    point.presence().orElse(0f) >= FULL_BODY_MIN_CONFIDENCE &&
+                    x in FULL_BODY_EDGE_MARGIN..(1f - FULL_BODY_EDGE_MARGIN) &&
+                    y in FULL_BODY_EDGE_MARGIN..(1f - FULL_BODY_EDGE_MARGIN)
+        }
+
+        if (!isCompleteBody) {
+            completeBodyCalibrationFrameCount = 0
+            return
+        }
+        completeBodyCalibrationFrameCount++
+        if (completeBodyCalibrationFrameCount >= FULL_BODY_CALIBRATION_FRAMES) {
+            finishFullBodyCalibrationHint()
+        }
+    }
+
+    //识别成功或5秒超时都结束提示；超时后OTT会自动使用原始映射。
+    private fun finishFullBodyCalibrationHint() {
+        if (!isFullBodyCalibrationHintActive) { return }
+        isFullBodyCalibrationHintActive = false
+        isFullBodyCalibrationFinishedForConnection = true
+        completeBodyCalibrationFrameCount = 0
+        uiHandler.removeCallbacks(calibrationHintTimeoutTask)
+        activity?.runOnUiThread {
+            if (_fragmentCameraBinding != null) {
+                fragmentCameraBinding.readyCheckOverlay.visibility = View.GONE
+            }
+        }
+    }
+
+    //新连接开始或连接结束时允许下一次重新提示和标定。
+    private fun resetFullBodyCalibrationSession() {
+        uiHandler.removeCallbacks(calibrationHintTimeoutTask)
+        isFullBodyCalibrationHintActive = false
+        isFullBodyCalibrationFinishedForConnection = false
+        completeBodyCalibrationFrameCount = 0
+        if (_fragmentCameraBinding != null) {
+            fragmentCameraBinding.readyPoseGuide.visibility = View.VISIBLE
+        }
+        if (_fragmentCameraBinding != null && !isReadyCheckActive) {
+            fragmentCameraBinding.readyCheckOverlay.visibility = View.GONE
         }
     }
 
@@ -514,6 +632,8 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
                     p0: AdapterView<*>?, p1: View?, p2: Int, p3: Long
                 ) {
                     try {
+                        //Spinner首次绑定也会回调；选项没有变化时禁止重复重建模型。
+                        if (poseLandmarkerHelper.currentDelegate == p2) return
                         poseLandmarkerHelper.currentDelegate = p2
                         updateControlsUi()
                     } catch(e: UninitializedPropertyAccessException) {
@@ -522,7 +642,6 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
                 }
 
                 override fun onNothingSelected(p0: AdapterView<*>?) {
-                    /* no op */
                 }
             }
 
@@ -539,12 +658,13 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
                     p2: Int,
                     p3: Long
                 ) {
+                    //Spinner首次绑定也会回调；选项没有变化时禁止重复重建模型。
+                    if (poseLandmarkerHelper.currentModel == p2) return
                     poseLandmarkerHelper.currentModel = p2
                     updateControlsUi()
                 }
 
                 override fun onNothingSelected(p0: AdapterView<*>?) {
-                    /* no op */
                 }
             }
     }
@@ -572,6 +692,8 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
                     poseLandmarkerHelper.minPosePresenceConfidence
                 )
 
+            if (isPoseModelLoading) { return }
+            isPoseModelLoading = true
             backgroundExecutor.execute {
 
                 //调整模型、阈值或CPU/GPU时，只重新创建MediaPipe实例，不生成CSV。
@@ -579,6 +701,7 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
                     saveCsv = false
                 )
                 poseLandmarkerHelper.setupPoseLandmarker()
+                isPoseModelLoading = false
             }
             fragmentCameraBinding.overlay.clear()
         }
@@ -623,6 +746,9 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
                 // The analyzer can then be assigned to the instance
                 .also {
                     it.setAnalyzer(backgroundExecutor) { image ->
+                        posePerfCameraFrameCount++
+                        posePerfCameraWidth = image.width
+                        posePerfCameraHeight = image.height
                         detectPose(image)
                     }
                 }
@@ -645,12 +771,18 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
     }
 
     private fun detectPose(imageProxy: ImageProxy) {
-        if(this::poseLandmarkerHelper.isInitialized) {
-            poseLandmarkerHelper.detectLiveStream(
-                imageProxy = imageProxy,
-                isFrontCamera = cameraFacing == CameraSelector.LENS_FACING_FRONT
-            )
+        //模型后台加载期间CameraX仍负责预览；分析帧必须及时关闭，不能堵塞相机管线。
+        if (!this::poseLandmarkerHelper.isInitialized ||
+            isPoseModelLoading ||
+            poseLandmarkerHelper.isClose()
+        ) {
+            imageProxy.close()
+            return
         }
+        poseLandmarkerHelper.detectLiveStream(
+            imageProxy = imageProxy,
+            isFrontCamera = cameraFacing == CameraSelector.LENS_FACING_FRONT
+        )
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -676,21 +808,18 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
 
         if (result != null) {
             updateReadyPoseDetection(result)
+            updateFullBodyCalibrationHint(result)
 
             //只有在OTT选择了健身视频后开始发送pose
             if (PoseConnectionManager.poseStreamingEnabled) {
-                // 1. MediaPipe -> PoseFrame
-                val poseFrame =
-                    PoseFrameConverter.convert(
-                        result = result,
-                        frameId = poseFrameId++,
-                        imageWidth = resultBundle.inputImageWidth,
-                        imageHeight = resultBundle.inputImageHeight
-                    )
+                // 1. MediaPipe -> rawPoseFrame
+                val rawPoseFrame = PoseFrameConverter.convert(result = result, frameId = poseFrameId++, imageWidth = resultBundle.inputImageWidth, imageHeight = resultBundle.inputImageHeight)
 
-                // 2. PoseFrame -> JSON
-                val json = PoseJsonEncoder.encode(poseFrame)
-                //Log.i("PoseFlow", "JSON generated, " + "frame=${poseFrame.frameId}, " + "length=${json.length}")
+                // 发送给OTT前进行One Euro滤波。
+                val filteredPoseFrame = poseFrameFilter.filter(rawPoseFrame)
+
+                // OTT收到的是滤波后的坐标。
+                val json = PoseJsonEncoder.encode(filteredPoseFrame)
 
                 if (PoseConnectionManager.isConnected()
                 ) {
@@ -738,15 +867,25 @@ class CameraFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener,
 
         Log.i(
             "POSE_PERF_PHONE",
-            "PHONE inference=${"%.1f".format(posePerfInferenceCount / seconds)}fps, " +
+            "PHONE camera=${"%.1f".format(posePerfCameraFrameCount / seconds)}fps, " +
+                    "input=${posePerfCameraWidth}x${posePerfCameraHeight}, " +
+                    "inference=${"%.1f".format(posePerfInferenceCount / seconds)}fps, " +
                     "valid=${"%.1f".format(posePerfValidPersonCount / seconds)}fps, " +
                     "sendAttempt=${"%.1f".format(posePerfSendAttemptCount / seconds)}fps, " +
                     "sendSuccess=${"%.1f".format(posePerfSendSuccessCount / seconds)}fps, " +
                     "inferAvg=${"%.1f".format(averageInferenceMs)}ms, " +
                     "inferMax=${posePerfInferenceMaxMs}ms, " +
-                    "streaming=${PoseConnectionManager.poseStreamingEnabled}"
+                    "streaming=${PoseConnectionManager.poseStreamingEnabled}, " +
+                    "delegate=${if (poseLandmarkerHelper.currentDelegate == PoseLandmarkerHelper.DELEGATE_GPU) "GPU" else "CPU"}, " +
+                    "model=${when (poseLandmarkerHelper.currentModel) {
+                        PoseLandmarkerHelper.MODEL_POSE_LANDMARKER_FULL -> "FULL"
+                        PoseLandmarkerHelper.MODEL_POSE_LANDMARKER_LITE -> "LITE"
+                        PoseLandmarkerHelper.MODEL_POSE_LANDMARKER_HEAVY -> "HEAVY"
+                        else -> "UNKNOWN"
+                    }}"
         )
 
+        posePerfCameraFrameCount = 0L
         posePerfInferenceCount = 0L
         posePerfValidPersonCount = 0L
         posePerfSendAttemptCount = 0L

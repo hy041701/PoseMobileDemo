@@ -349,7 +349,7 @@ class GalleryFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener {
                                 viewModel.currentDelegate
                         )
 
-                    poseLandmarkerHelper.resetPoseData()
+                    // poseLandmarkerHelper.resetPoseData() // CSV本地缓存已停用
                     poseLandmarkerHelper.detectImage(bitmap)?.let { result ->
                         activity?.runOnUiThread {
                             fragmentGalleryBinding.overlay.setResults(
@@ -365,7 +365,7 @@ class GalleryFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener {
                         }
                     } ?: run { Log.e(TAG, "Error running pose landmarker.") }
 
-                    poseLandmarkerHelper.clearPoseLandmarker(saveCsv = true)
+                    poseLandmarkerHelper.clearPoseLandmarker(saveCsv = false)
                 }
             }
     }
@@ -394,7 +394,7 @@ class GalleryFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener {
                     currentDelegate = viewModel.currentDelegate
                 )
 
-            poseLandmarkerHelper.resetPoseData()
+            // poseLandmarkerHelper.resetPoseData() // CSV本地缓存已停用
 
             activity?.runOnUiThread {
                 fragmentGalleryBinding.videoView.visibility = View.GONE
@@ -407,7 +407,7 @@ class GalleryFragment : Fragment(), PoseLandmarkerHelper.LandmarkerListener {
                 }
                 ?: run { Log.e(TAG, "Error running pose landmarker.") }
 
-            poseLandmarkerHelper.clearPoseLandmarker(saveCsv = true)
+            poseLandmarkerHelper.clearPoseLandmarker(saveCsv = false)
         }
     }
 

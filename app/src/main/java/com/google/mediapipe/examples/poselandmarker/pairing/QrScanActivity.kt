@@ -112,11 +112,7 @@ class QrScanActivity : AppCompatActivity() {
                 } catch (
                     exception: Exception
                 ) {
-                    Log.e(
-                        TAG,
-                        "QR camera bind failed",
-                        exception
-                    )
+                    Log.e(TAG, "QR camera bind failed", exception)
                 }
             },
                 ContextCompat.getMainExecutor(
@@ -155,18 +151,13 @@ class QrScanActivity : AppCompatActivity() {
                     barcodes ->
                 // 如果这一帧识别到了二维码，取第一个二维码的原始字符串。
                 val rawValue = barcodes.firstOrNull()?.rawValue
-
                 if (rawValue != null) {
                     handleQrValue(rawValue)
                 }
             }
             .addOnFailureListener {
                     exception ->
-                Log.e(
-                    TAG,
-                    "QR scan failed",
-                    exception
-                )
+                Log.e(TAG, "QR scan failed", exception)
             }
             .addOnCompleteListener {
                 //非常重要：无论成功还是失败，这一帧处理完成后都必须close。
@@ -178,24 +169,14 @@ class QrScanActivity : AppCompatActivity() {
         qrValue: String
     ) {
         // 已经成功过了，直接返回。
-        if (scanFinished) {
-            return
-        }
-
-        Log.i(
-            TAG,
-            "Raw QR = $qrValue"
-        )
+        if (scanFinished) { return }
 
         // 1. 把二维码字符串解析成Uri
         val uri = Uri.parse(qrValue)
 
         // 2. 判断是不是我们OTT生成的二维码
         if (uri.scheme != "poseott" || uri.host != "pair") {
-            Log.w(
-                TAG,
-                "Not PoseOTT QR"
-            )
+            Log.w(TAG, "Not PoseOTT QR")
             return
         }
 
@@ -208,37 +189,22 @@ class QrScanActivity : AppCompatActivity() {
         // 端口合法性检查
         if (port !in 1..65535
         ) {
-            Log.e(
-                TAG,
-                "Invalid port=$port"
-            )
+            Log.e(TAG, "Invalid port=$port")
             return
         }
 
         // 5. 标记扫描完成
         scanFinished = true
-        Log.i(
-            TAG,
-            "OTT host=$host, port=$port"
-        )
+        Log.i(TAG, "OTT host=$host, port=$port")
 
         // 6. 准备返回给CameraFragment的数据
         val resultIntent = Intent().apply {
-                putExtra(
-                    "ott_host",
-                    host
-                )
-                putExtra(
-                    "ott_port",
-                    port
-                )
+                putExtra("ott_host", host)
+                putExtra("ott_port", port)
             }
 
         // 7. 返回成功
-        setResult(
-            Activity.RESULT_OK,
-            resultIntent
-        )
+        setResult(Activity.RESULT_OK, resultIntent)
 
         // 8. 关闭扫码页面
         finish()

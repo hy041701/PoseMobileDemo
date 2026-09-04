@@ -70,12 +70,8 @@ object PoseConnectionManager :
     fun sendPose(
         message: String
     ): Boolean {
-        if (!poseStreamingEnabled) {
-            return false
-        }
-        if (!client.isConnected()) {
-            return false
-        }
+        if (!poseStreamingEnabled) { return false }
+        if (!client.isConnected()) { return false }
         return client.send(message)
     }
 

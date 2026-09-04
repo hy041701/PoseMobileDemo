@@ -46,6 +46,7 @@
         android:visibility="gone">
 
         <com.google.mediapipe.examples.poselandmarker.ReadyPoseGuideView
+            android:id="@+id/readyPoseGuide"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:contentDescription="透明举手动作对齐区域" />

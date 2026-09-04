@@ -24,7 +24,8 @@ class MainViewModel : ViewModel() {
 
     private var _model = PoseLandmarkerHelper.MODEL_POSE_LANDMARKER_FULL
 //    private var _model = PoseLandmarkerHelper.MODEL_POSE_LANDMARKER_LITE
-    private var _delegate: Int = PoseLandmarkerHelper.DELEGATE_CPU
+    //GPU性能测试：默认使用GPU运行Full模型。
+    private var _delegate: Int = PoseLandmarkerHelper.DELEGATE_GPU
     private var _minPoseDetectionConfidence: Float = PoseLandmarkerHelper.DEFAULT_POSE_DETECTION_CONFIDENCE
     private var _minPoseTrackingConfidence: Float = PoseLandmarkerHelper.DEFAULT_POSE_TRACKING_CONFIDENCE
     private var _minPosePresenceConfidence: Float = PoseLandmarkerHelper.DEFAULT_POSE_PRESENCE_CONFIDENCE
